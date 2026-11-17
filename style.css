@@ -135,6 +135,79 @@ body.warm {
   border-color: var(--line);
 }
 
+/* 會長腳走掉的按鈕 */
+.btn.walk {
+  position: relative;
+  z-index: 2;
+  transition: translate var(--walk-time, 2s) linear, scale 0.6s ease-in-out,
+    background-color 0.25s, color 0.25s, border-color 0.25s;
+}
+
+/* 把自己壓窄用的兩隻手 */
+.btn.walk .hand {
+  position: absolute;
+  top: 50%;
+  width: 12px;
+  height: 2px;
+  margin-top: -1px;
+  background: var(--ink);
+  scale: 0 1;
+  transition: scale 0.3s ease;
+}
+.btn.walk .hand::after {
+  content: "";
+  position: absolute;
+  top: -6px;
+  width: 2px;
+  height: 14px;
+  border-radius: 1px;
+  background: var(--ink);
+}
+.btn.walk .hand.left  { right: 100%; margin-right: 1px; transform-origin: right center; }
+.btn.walk .hand.right { left: 100%;  margin-left: 1px;  transform-origin: left center; }
+.btn.walk .hand.left::after  { right: 0; }
+.btn.walk .hand.right::after { left: 0; }
+.btn.walk.hands .hand { scale: 1 1; }
+.btn.walk::before,
+.btn.walk::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  width: 7px;
+  height: 13px;
+  border-left: 2px solid var(--ink);
+  border-bottom: 2px solid var(--ink);
+  transform-origin: 1px 0;
+  scale: 1 0;
+  opacity: 0;
+  transition: scale 0.3s ease, opacity 0.15s ease;
+}
+.btn.walk::before { left: 32%; }
+.btn.walk::after  { left: 62%; }
+.btn.walk.legs::before,
+.btn.walk.legs::after {
+  scale: 1 1;
+  opacity: 1;
+}
+.btn.walk.walking::before { animation: leg-swing 0.36s ease-in-out infinite alternate; }
+.btn.walk.walking::after  { animation: leg-swing 0.36s ease-in-out infinite alternate-reverse; }
+
+@keyframes leg-swing {
+  from { rotate: 28deg; }
+  to   { rotate: -28deg; }
+}
+
+/* 走路的按鈕最後會躲到這顆按鈕後面 */
+.btn.cover {
+  position: relative;
+  z-index: 6;
+  background: var(--bg);
+}
+.btn.cover:hover,
+.btn.cover:focus-visible {
+  background: var(--ink);
+}
+
 /* 碎片 */
 .btn.shard {
   position: fixed;

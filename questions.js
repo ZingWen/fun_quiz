@@ -13,6 +13,9 @@
  *                          只寫 next 不寫 result，就會直接跳到下一題。
  *       type: 'flee'    → 滑鼠一碰到就逃跑的選項，永遠點不到。
  *       type: 'shatter' → 點擊後碎掉消失的選項。
+ *       type: 'walk'    → 點擊後長出兩隻腳，慢慢走到別的地方。
+ *     gatherAfter: （可省略）'walk' 按鈕合計被點擊這麼多次後，
+ *       全部一起走到 'accept' 按鈕後面躲起來，之後點那個位置一律算點擊 'accept'。
  *     stubborn: （可省略）逃跑按鈕累積逃跑夠多次後，右下角出現的隱藏入口
  *       { after: 次數, text: 提示文字, button: 按鈕文字, goto: '題目代號' }
  *   }
@@ -35,6 +38,7 @@ window.QUIZ = {
           text: '同意',
           type: 'accept',
           result: { message: '我也有同感，\n我以你為傲。', effect: 'fireworks' },
+          next: 'q2',
         },
         { text: '普通', type: 'flee' },
         { text: '不同意', type: 'flee' },
@@ -55,9 +59,25 @@ window.QUIZ = {
           text: '好',
           type: 'accept',
           result: { message: '謝謝你讓我待著，\n我也想待著。', effect: 'warm' },
+          next: 'q2',
         },
         { text: '不好', type: 'shatter' },
       ],
+    },
+
+    q2: {
+      label: '第 2 題',
+      text: '我值得別人對我好',
+      options: [
+        {
+          text: '同意',
+          type: 'accept',
+          result: { message: '你終於明白了，\n太好了！', effect: 'fireworks' },
+        },
+        { text: '普通', type: 'walk' },
+        { text: '不同意', type: 'walk' },
+      ],
+      gatherAfter: 4,
     },
   },
 };

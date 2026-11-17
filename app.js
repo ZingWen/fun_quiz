@@ -51,10 +51,16 @@
     const options = el('div', 'options');
     const state = { flees: 0, toast: null };
 
+    const walkBtns = [];
+    let acceptBtn = null;
+    let acceptAction = null;
+
     q.options.forEach((opt) => {
       const btn = el('button', 'btn', opt.text);
       btn.type = 'button';
-      if (opt.type === 'flee') {
+      if (opt.type === 'walk') {
+        walkBtns.push(btn);
+      } else if (opt.type === 'flee') {
         setupFlee(btn, options, () => {
           state.flees += 1;
           if (q.stubborn && !state.toast && state.flees >= q.stubborn.after) {
@@ -64,13 +70,22 @@
       } else if (opt.type === 'shatter') {
         btn.addEventListener('click', () => shatter(btn), { once: true });
       } else {
-        btn.addEventListener('click', () => {
+        const action = () => {
           if (opt.result) showResult(opt);
           else showQuestion(opt.next);
-        });
+        };
+        btn.addEventListener('click', action);
+        if (!acceptBtn) {
+          acceptBtn = btn;
+          acceptAction = action;
+        }
       }
       options.append(btn);
     });
+
+    if (walkBtns.length) {
+      setupWalkers(walkBtns, options, acceptBtn, acceptAction, q.gatherAfter);
+    }
 
     screen.append(options);
     show(screen);
@@ -197,6 +212,151 @@
       tx = 0;
       ty = 0;
       btn.style.transform = '';
+    };
+    window.addEventListener('resize', onResize);
+    cleanups.push(() => window.removeEventListener('resize', onResize));
+  }
+
+  /* ---------- 長腳走掉的按鈕 ---------- */
+
+  function currentTranslate(node) {
+    const t = getComputedStyle(node).translate;
+    if (!t || t === 'none') return [0, 0];
+    const parts = t.split(' ').map(parseFloat);
+    return [parts[0] || 0, parts[1] || 0];
+  }
+
+  function setupWalkers(btns, container, acceptBtn, onAccept, limit) {
+    const SPEED = 110; // 每秒走幾 px
+    const canGather = Boolean(acceptBtn && limit);
+    let count = 0;
+    let gathering = false;
+
+    const walkers = btns.map((btn) => {
+      btn.classList.add('walk');
+      return { btn, token: 0, busy: false, arrived: false };
+    });
+
+    // 讓按鈕走到畫面上的 (nx, ny)（按鈕左上角的位置）
+    function walkTo(w, nx, ny, done) {
+      const token = ++w.token;
+      const btn = w.btn;
+      w.busy = true;
+
+      const rect = btn.getBoundingClientRect();
+      const [cx, cy] = currentTranslate(btn);
+      const tx = nx - (rect.left - cx);
+      const ty = ny - (rect.top - cy);
+      const dist = Math.hypot(nx - rect.left, ny - rect.top);
+      const duration = Math.min(4.5, Math.max(1.2, dist / SPEED));
+
+      btn.classList.add('legs'); // 先把腳長出來
+      setTimeout(() => {
+        if (token !== w.token) return;
+        btn.classList.add('walking');
+        btn.style.setProperty('--walk-time', `${duration}s`);
+        btn.style.translate = `${tx}px ${ty}px`;
+        setTimeout(() => {
+          if (token !== w.token) return;
+          btn.classList.remove('walking', 'legs'); // 到了，把腳收起來
+          w.busy = false;
+          if (done) done();
+        }, duration * 1000 + 60);
+      }, 380);
+    }
+
+    function randomSpot(btn) {
+      const rect = btn.getBoundingClientRect();
+      const pad = 16;
+      const maxX = window.innerWidth - rect.width - pad;
+      const maxY = window.innerHeight - rect.height - pad - 16; // 留位置給腳
+      const others = [...container.children]
+        .filter((b) => b !== btn)
+        .map((b) => b.getBoundingClientRect());
+      const overlaps = (x, y) =>
+        others.some(
+          (o) =>
+            x < o.right + 12 &&
+            x + rect.width > o.left - 12 &&
+            y < o.bottom + 12 &&
+            y + rect.height > o.top - 12
+        );
+
+      for (let i = 0; i < 80; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const d = 140 + Math.random() * 220;
+        const x = rect.left + Math.cos(angle) * d;
+        const y = rect.top + Math.sin(angle) * d;
+        if (x < pad || x > maxX || y < pad || y > maxY) continue;
+        if (!overlaps(x, y)) return [x, y];
+      }
+      return [
+        pad + Math.random() * Math.max(0, maxX - pad),
+        pad + Math.random() * Math.max(0, maxY - pad),
+      ];
+    }
+
+    function acceptSpot(btn) {
+      const a = acceptBtn.getBoundingClientRect();
+      const r = btn.getBoundingClientRect();
+      return [a.left + (a.width - r.width) / 2, a.top + (a.height - r.height) / 2];
+    }
+
+    // 比「同意」寬的按鈕，躲好後伸出兩隻手把自己壓窄，才不會露出來
+    function squeeze(btn) {
+      const ratio = acceptBtn.offsetWidth / btn.offsetWidth;
+      if (ratio >= 0.99) return;
+      const hands = ['left', 'right'].map((side) => {
+        const hand = el('span', `hand ${side}`);
+        btn.append(hand);
+        return hand;
+      });
+      void btn.offsetWidth;
+      btn.classList.add('hands'); // 手伸出來
+      setTimeout(() => {
+        btn.style.scale = `${ratio} 1`; // 往內壓
+      }, 400);
+      setTimeout(() => btn.classList.remove('hands'), 1150); // 手收回去
+      setTimeout(() => hands.forEach((hand) => hand.remove()), 1500);
+    }
+
+    walkers.forEach((w) => {
+      w.btn.addEventListener('click', () => {
+        if (gathering) {
+          if (w.arrived) onAccept(); // 躲在「同意」後面時，點到一律算同意
+          return;
+        }
+        if (w.busy) return;
+        count += 1;
+        if (canGather && count >= limit) {
+          gathering = true;
+          acceptBtn.classList.add('cover');
+          walkers.forEach((x) => {
+            walkTo(x, ...acceptSpot(x.btn), () => {
+              x.arrived = true;
+              squeeze(x.btn);
+            });
+          });
+        } else {
+          walkTo(w, ...randomSpot(w.btn));
+        }
+      });
+    });
+
+    const onResize = () => {
+      walkers.forEach((w) => {
+        w.token += 1;
+        w.busy = false;
+        w.btn.classList.remove('walking', 'legs');
+        w.btn.style.setProperty('--walk-time', '0s');
+        w.btn.style.translate = '';
+        if (gathering) {
+          const [x, y] = acceptSpot(w.btn);
+          const r = w.btn.getBoundingClientRect();
+          w.btn.style.translate = `${x - r.left}px ${y - r.top}px`;
+          w.arrived = true;
+        }
+      });
     };
     window.addEventListener('resize', onResize);
     cleanups.push(() => window.removeEventListener('resize', onResize));
