@@ -24,7 +24,7 @@
   function show(screen, mood) {
     cleanups.forEach((fn) => fn());
     cleanups = [];
-    document.body.classList.remove('night', 'warm');
+    document.body.classList.remove('night', 'warm', 'void');
     if (mood) document.body.classList.add(mood);
     app.replaceChildren(screen);
   }
@@ -46,26 +46,86 @@
 
     const screen = el('section', 'screen');
     if (q.label) screen.append(el('p', 'label', q.label));
-    screen.append(el('h2', 'question', q.text));
+    const heading = el('h2', 'question', q.text);
+    screen.append(heading);
 
     const options = el('div', 'options');
-    const state = { flees: 0, toast: null };
+    // 晚一點才淡入的文字和選項（位置先留好，出現時畫面不會跳動）
+    const lateNodes = [];
+    if (q.late) {
+      if (q.late.text) {
+        const more = el('span', 'late-text late', q.late.text);
+        heading.append(more);
+        lateNodes.push(more);
+      }
+      options.classList.add('late');
+      lateNodes.push(options);
+    }
+    const state = { stubborn: 0, stubbornShown: false, toast: null };
+
+    // 右下角同一時間只放一個提示
+    const setToast = (cfg) => {
+      if (state.toast) state.toast.remove();
+      state.toast = showToast(cfg);
+    };
+    // 逃跑、縮小都算「堅持」，累積夠多次就出現隱藏入口
+    const bumpStubborn = () => {
+      state.stubborn += 1;
+      if (q.stubborn && !state.stubbornShown && state.stubborn >= q.stubborn.after) {
+        state.stubbornShown = true;
+        setToast(q.stubborn);
+      }
+    };
 
     const walkBtns = [];
+    const orbitBtns = [];
     let acceptBtn = null;
     let acceptAction = null;
+    let crack = null; // 所有 'crack' 按鈕共用同一片裂開的畫面
 
     q.options.forEach((opt) => {
       const btn = el('button', 'btn', opt.text);
       btn.type = 'button';
-      if (opt.type === 'walk') {
+      if (opt.big) {
+        btn.classList.add('big');
+        btn.style.setProperty('--big', opt.big);
+      }
+      if (opt.orbit) orbitBtns.push(btn);
+      if (opt.type === 'fade') {
+        btn.addEventListener(
+          'click',
+          () => {
+            btn.disabled = true;
+            btn.classList.add('fading');
+            if (opt.confirm) setToast(opt.confirm);
+          },
+          { once: true }
+        );
+      } else if (opt.type === 'walk') {
         walkBtns.push(btn);
+      } else if (opt.type === 'crack') {
+        if (!crack) crack = makeCrack(screen, q.crackAfter || 4, bumpStubborn);
+        btn.addEventListener('click', (e) => crack.hit(e, btn));
+      } else if (opt.type === 'tilt') {
+        setupTilt(btn, opt.after || 4, () => opt.spin && setToast({ text: opt.spin }));
       } else if (opt.type === 'flee') {
-        setupFlee(btn, options, () => {
-          state.flees += 1;
-          if (q.stubborn && !state.toast && state.flees >= q.stubborn.after) {
-            state.toast = showToast(q.stubborn);
-          }
+        setupFlee(btn, options, bumpStubborn);
+      } else if (opt.type === 'shrink') {
+        setupShrink(btn, bumpStubborn);
+      } else if (opt.type === 'drop') {
+        const touch = window.matchMedia('(pointer: coarse)').matches;
+        const hint = opt.hint || {};
+        let hinted = false;
+        setupDrop(btn, {
+          onLanded() {
+            const text = touch ? hint.shake : hint.drag;
+            if (hinted || !text) return;
+            hinted = true;
+            setToast({ text });
+          },
+          onBroken() {
+            if (opt.broken) setToast({ text: opt.broken });
+          },
         });
       } else if (opt.type === 'shatter') {
         btn.addEventListener('click', () => shatter(btn), { once: true });
@@ -88,8 +148,28 @@
     }
 
     screen.append(options);
-    show(screen);
+    show(screen, q.mood);
+
+    // 繞圈的按鈕：繞著放大的那顆（沒有的話就繞第一顆別的按鈕）
+    // 要在 show() 之後才啟動，不然動畫會被 show() 的清理動作馬上停掉
+    orbitBtns.forEach((btn, i) => {
+      const others = [...options.children].filter((b) => !orbitBtns.includes(b));
+      const target = others.find((b) => b.classList.contains('big')) || others[0];
+      if (target) setupOrbit(btn, target, (i / orbitBtns.length) * Math.PI * 2);
+    });
     cleanups.push(() => state.toast && state.toast.remove());
+    if (crack) cleanups.push(crack.destroy);
+    if (q.late) {
+      const timer = setTimeout(
+        () => lateNodes.forEach((node) => node.classList.add('shown')),
+        q.late.after * 1000
+      );
+      cleanups.push(() => clearTimeout(timer));
+    }
+    if (q.auto) {
+      const timer = setTimeout(() => showQuestion(q.auto.goto), q.auto.after * 1000);
+      cleanups.push(() => clearTimeout(timer));
+    }
   }
 
   function showResult(opt) {
@@ -111,13 +191,492 @@
   }
 
   function showToast(cfg) {
-    const toast = el('div', 'toast');
+    const toast = el('div', cfg.button ? 'toast' : 'toast plain');
     toast.append(el('span', null, cfg.text));
-    const btn = el('button', 'btn', cfg.button);
-    btn.addEventListener('click', () => showQuestion(cfg.goto));
-    toast.append(btn);
+    if (cfg.button) {
+      const btn = el('button', 'btn', cfg.button);
+      btn.addEventListener('click', () => showQuestion(cfg.goto));
+      toast.append(btn);
+    }
     document.body.append(toast);
     return toast;
+  }
+
+  /* ---------- 繞著別的按鈕快速轉圈的按鈕 ---------- */
+
+  // 還是可以點，只是要抓得到。
+  function setupOrbit(btn, target, phase) {
+    btn.classList.add('orbit');
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const SPEED = ((Math.PI * 2) / 2.1) * (reduced ? 0.15 : 1); // 一圈約 2.1 秒
+    const GAP = 14;
+    let angle = phase - Math.PI / 2;
+    let last = performance.now();
+    let frame = 0;
+
+    const step = (now) => {
+      angle += SPEED * Math.min(0.05, (now - last) / 1000);
+      last = now;
+      const r = target.getBoundingClientRect();
+      const w = btn.offsetWidth;
+      const h = btn.offsetHeight;
+      let x = r.left + r.width / 2 + Math.cos(angle) * (r.width / 2 + w / 2 + GAP) - w / 2;
+      let y = r.top + r.height / 2 + Math.sin(angle) * (r.height / 2 + h / 2 + GAP) - h / 2;
+      // 不要跑出畫面
+      x = Math.min(Math.max(4, x), Math.max(4, window.innerWidth - w - 4));
+      y = Math.min(Math.max(4, y), Math.max(4, window.innerHeight - h - 4));
+      btn.style.transform = `translate(${x}px, ${y}px)`;
+      frame = requestAnimationFrame(step);
+    };
+    frame = requestAnimationFrame(step);
+    cleanups.push(() => cancelAnimationFrame(frame));
+
+    // 按下去的瞬間就算數：按鈕跑太快，等到放開時它已經不在游標底下，
+    // 瀏覽器就不會把這次當成點擊。
+    btn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      btn.click();
+    });
+  }
+
+  /* ---------- 越按越小的按鈕 ---------- */
+
+  function setupShrink(btn, onShrink) {
+    btn.classList.add('shrink');
+    let scale = 1;
+    btn.addEventListener('click', () => {
+      scale = Math.max(0.12, scale * 0.72);
+      btn.style.scale = String(scale);
+      onShrink();
+    });
+  }
+
+  /* ---------- 越按越歪、最後轉起來的按鈕 ---------- */
+
+  function setupTilt(btn, after, onSpin) {
+    btn.classList.add('tilt');
+    let count = 0;
+    let angle = 0;
+    let spinning = false;
+    let frame = 0;
+
+    function spin() {
+      spinning = true;
+      btn.classList.add('spinning');
+      let speed = 40; // 度/秒
+      let last = performance.now();
+      const step = (now) => {
+        const dt = Math.min(0.05, (now - last) / 1000);
+        last = now;
+        speed = Math.min(2400, speed + (120 + speed * 0.9) * dt); // 越轉越快
+        angle += speed * dt;
+        btn.style.rotate = `${angle % 360}deg`;
+        frame = requestAnimationFrame(step);
+      };
+      frame = requestAnimationFrame(step);
+      onSpin();
+    }
+
+    btn.addEventListener('click', () => {
+      if (spinning) return;
+      count += 1;
+      angle += 6 + (count - 1) * 4; // 6、16、30、48 度…一次比一次歪
+      btn.style.rotate = `${angle}deg`;
+      if (count >= after) setTimeout(spin, 450);
+    });
+    cleanups.push(() => cancelAnimationFrame(frame));
+  }
+
+  /* ---------- 裂開的畫面 ---------- */
+
+  // 從第一次點擊的位置往外裂。每點一次多裂一點，點到 limit 次整個畫面碎掉落下。
+  // onCount 每點一次呼叫一次；最後一次會等碎片掉完才呼叫。
+  function makeCrack(screen, limit, onCount) {
+    const NS = 'http://www.w3.org/2000/svg';
+    let count = 0;
+    let broken = false;
+    let geo = null;
+    let svg = null;
+    let timers = [];
+    const pieces = [];
+
+    function build(cx, cy) {
+      const W = window.innerWidth;
+      const H = window.innerHeight;
+      const R = Math.hypot(Math.max(cx, W - cx), Math.max(cy, H - cy)) * 1.25;
+      const n = 9 + Math.floor(Math.random() * 3);
+      const base = Math.random() * Math.PI * 2;
+      const rings = [0.1, 0.28, 0.55, 1];
+      const angles = Array.from(
+        { length: n },
+        (_, i) => base + ((i + (Math.random() - 0.5) * 0.6) * Math.PI * 2) / n
+      );
+      // pts[i][j]：第 i 條放射裂痕和第 j 圈的交點
+      const pts = angles.map((a) =>
+        rings.map((f, j) => {
+          const r = f * R * (j === rings.length - 1 ? 1 : 0.75 + Math.random() * 0.5);
+          return [cx + Math.cos(a) * r, cy + Math.sin(a) * r];
+        })
+      );
+      geo = { cx, cy, n, m: rings.length, pts, W, H };
+
+      svg = document.createElementNS(NS, 'svg');
+      svg.setAttribute('class', 'cracks');
+      svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+      svg.setAttribute('aria-hidden', 'true');
+      document.body.append(svg);
+    }
+
+    function line(a, b, stage) {
+      const path = document.createElementNS(NS, 'path');
+      path.setAttribute('d', `M${a[0]} ${a[1]}L${b[0]} ${b[1]}`);
+      path.setAttribute('pathLength', '1');
+      path.dataset.stage = stage;
+      svg.append(path);
+    }
+
+    // 依照第幾下，畫出該出現的裂痕
+    function drawStage(stage) {
+      const { cx, cy, n, pts } = geo;
+      const c = [cx, cy];
+      for (let i = 0; i < n; i++) {
+        const next = pts[(i + 1) % n];
+        const ray = pts[i];
+        if (stage === 1) {
+          if (i % 2 === 0 || Math.random() < 0.3) {
+            line(c, ray[0], 1);
+            line(ray[0], ray[1], 1);
+          }
+        } else if (stage === 2) {
+          line(c, ray[0], 2);
+          line(ray[0], ray[1], 2);
+          line(ray[1], ray[2], 2);
+          line(ray[0], next[0], 2);
+        } else if (stage === 3) {
+          line(ray[2], ray[3], 3);
+          line(ray[1], next[1], 3);
+          if (Math.random() < 0.5) line(ray[2], next[2], 3);
+        }
+      }
+      // 下一個畫面更新時才開始畫，才看得到裂開的過程
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          svg.querySelectorAll(`[data-stage="${stage}"]`).forEach((p) => p.classList.add('on'));
+        })
+      );
+    }
+
+    function polygons() {
+      const { cx, cy, n, m, pts } = geo;
+      const list = [];
+      for (let i = 0; i < n; i++) {
+        const a = pts[i];
+        const b = pts[(i + 1) % n];
+        list.push([[cx, cy], a[0], b[0]]);
+        for (let j = 0; j < m - 1; j++) list.push([a[j], b[j], b[j + 1], a[j + 1]]);
+      }
+      return list;
+    }
+
+    // 整個畫面碎成好幾片掉下去
+    function shatterScreen() {
+      broken = true;
+      const bg = getComputedStyle(document.body).backgroundColor;
+      const { cx, cy, H } = geo;
+      let longest = 0;
+
+      polygons().forEach((poly) => {
+        const piece = el('div', 'crack-piece');
+        piece.style.background = bg;
+        const clone = screen.cloneNode(true);
+        const holder = el('div', 'app-clone');
+        holder.append(clone);
+        piece.append(holder);
+
+        const px = poly.reduce((s, p) => s + p[0], 0) / poly.length;
+        const py = poly.reduce((s, p) => s + p[1], 0) / poly.length;
+        piece.style.clipPath = `polygon(${poly.map((p) => `${p[0]}px ${p[1]}px`).join(', ')})`;
+        piece.style.transformOrigin = `${px}px ${py}px`;
+        document.body.append(piece);
+        pieces.push(piece);
+
+        const dx = (px - cx) * 0.12 + (Math.random() - 0.5) * 60;
+        const rot = (Math.random() - 0.5) * 50;
+        const delay = Math.random() * 350 + (Math.hypot(px - cx, py - cy) < 120 ? 0 : 120);
+        const duration = 1100 + Math.random() * 600;
+        longest = Math.max(longest, delay + duration);
+        piece.animate(
+          [
+            { transform: 'translate(0, 0) rotate(0deg)' },
+            { transform: `translate(${dx * 0.1}px, 6px) rotate(${rot * 0.05}deg)`, offset: 0.08 },
+            { transform: `translate(${dx}px, ${H * 1.3}px) rotate(${rot}deg)` },
+          ],
+          { duration, delay, easing: 'cubic-bezier(0.55, 0, 0.85, 0.5)', fill: 'forwards' }
+        );
+      });
+
+      // 碎片後面已經是一片黑
+      screen.style.visibility = 'hidden';
+      if (svg) svg.remove();
+      document.body.classList.add('void');
+
+      timers.push(
+        setTimeout(() => {
+          pieces.forEach((p) => p.remove());
+          onCount();
+        }, longest + 100)
+      );
+    }
+
+    function hit(e, btn) {
+      if (broken) return;
+      if (!geo) {
+        let x = e.clientX;
+        let y = e.clientY;
+        if (!e.detail) {
+          const r = btn.getBoundingClientRect(); // 用鍵盤按的
+          x = r.left + r.width / 2;
+          y = r.top + r.height / 2;
+        }
+        build(x, y);
+      }
+      count += 1;
+      app.animate(
+        [
+          { translate: '0 0' },
+          { translate: '-5px 3px' },
+          { translate: '4px -2px' },
+          { translate: '0 0' },
+        ],
+        { duration: 220 }
+      );
+      if (count >= limit) {
+        timers.push(setTimeout(shatterScreen, 180));
+        return;
+      }
+      drawStage(count);
+      onCount();
+    }
+
+    function destroy() {
+      timers.forEach(clearTimeout);
+      pieces.forEach((p) => p.remove());
+      if (svg) svg.remove();
+    }
+
+    return { hit, destroy };
+  }
+
+  /* ---------- 掉到地上的按鈕 ---------- */
+
+  // 點了之後掉到畫面底部。之後拖曳它、或搖晃手機，它都會「用力過猛」
+  // 撞到畫面邊界然後碎掉。
+  function setupDrop(btn, hooks) {
+    const GRAVITY = 2600; // px/s²
+    const OVERSHOOT = 1.6; // 拖曳時比手指多跑多少
+    let mode = 'idle'; // idle | falling | resting | dragging | thrown | broken
+    let x = 0;
+    let y = 0;
+    let vx = 0;
+    let vy = 0;
+    let w = 0;
+    let h = 0;
+    let frame = 0;
+    let last = 0;
+
+    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+    const maxX = () => Math.max(0, window.innerWidth - w);
+    const maxY = () => Math.max(0, window.innerHeight - h);
+    const place = () => {
+      btn.style.left = `${x}px`;
+      btn.style.top = `${y}px`;
+    };
+
+    function breakIt() {
+      mode = 'broken';
+      cancelAnimationFrame(frame);
+      window.removeEventListener('devicemotion', onMotion);
+      shatter(btn);
+      hooks.onBroken();
+    }
+
+    function step(now) {
+      const dt = Math.min(0.032, (now - last) / 1000);
+      last = now;
+      vy += GRAVITY * dt;
+      x += vx * dt;
+      y += vy * dt;
+
+      const mx = maxX();
+      const my = maxY();
+      const hitSide = x <= 0 || x >= mx;
+      const hitTop = y <= 0;
+      const hitFloor = y >= my;
+      x = clamp(x, 0, mx);
+      y = clamp(y, 0, my);
+      place();
+
+      if (mode === 'thrown' && (hitSide || hitTop || hitFloor)) return breakIt();
+
+      // 自己掉下來的時候只會彈一彈
+      if (hitSide) vx *= -0.4;
+      if (hitTop) vy = Math.abs(vy) * 0.4;
+      if (hitFloor) {
+        vy *= -0.35;
+        vx *= 0.8;
+        if (Math.abs(vy) < 140) {
+          vx = 0;
+          vy = 0;
+          mode = 'resting';
+          hooks.onLanded();
+          return;
+        }
+      }
+      frame = requestAnimationFrame(step);
+    }
+
+    function run(nextMode) {
+      mode = nextMode;
+      cancelAnimationFrame(frame);
+      last = performance.now();
+      frame = requestAnimationFrame(step);
+    }
+
+    // 往 (dx, dy) 的方向用力甩出去
+    function throwToward(dx, dy, minSpeed) {
+      const len = Math.hypot(dx, dy) || 1;
+      const speed = Math.max(minSpeed, len);
+      vx = (dx / len) * speed;
+      vy = (dy / len) * speed;
+      run('thrown');
+    }
+
+    // 搖晃手機
+    let prevG = null;
+    function onMotion(e) {
+      if (mode !== 'resting') return;
+      let ax = 0;
+      let strength = 0;
+      const a = e.acceleration;
+      if (a && a.x != null) {
+        ax = a.x;
+        strength = Math.hypot(a.x, a.y || 0, a.z || 0);
+      } else if (e.accelerationIncludingGravity) {
+        const g = e.accelerationIncludingGravity;
+        if (prevG) {
+          ax = g.x - prevG.x;
+          strength = Math.hypot(g.x - prevG.x, g.y - prevG.y, g.z - prevG.z);
+        }
+        prevG = { x: g.x || 0, y: g.y || 0, z: g.z || 0 };
+      }
+      if (strength < 13) return;
+      const side = -Math.sign(ax) || (Math.random() < 0.5 ? -1 : 1);
+      throwToward(side * (0.6 + Math.random() * 0.8), -1, 2000);
+    }
+
+    btn.addEventListener(
+      'click',
+      () => {
+        // iOS 要在使用者點擊的當下要求動作感測權限
+        const DM = window.DeviceMotionEvent;
+        if (DM && typeof DM.requestPermission === 'function') {
+          DM.requestPermission().catch(() => {});
+        }
+        window.addEventListener('devicemotion', onMotion);
+        cleanups.push(() => {
+          cancelAnimationFrame(frame);
+          window.removeEventListener('devicemotion', onMotion);
+        });
+
+        const r = btn.getBoundingClientRect();
+        w = r.width;
+        h = r.height;
+        x = r.left;
+        y = r.top;
+        btn.classList.add('dropped');
+        btn.blur();
+        place();
+        vx = (Math.random() - 0.5) * 120;
+        vy = 0;
+        run('falling');
+      },
+      { once: true }
+    );
+
+    // 拖曳
+    btn.addEventListener('pointerdown', (e) => {
+      if (mode !== 'resting' && mode !== 'falling') return;
+      e.preventDefault();
+      cancelAnimationFrame(frame);
+      mode = 'dragging';
+      btn.setPointerCapture(e.pointerId);
+
+      const sx = e.clientX;
+      const sy = e.clientY;
+      const ox = x;
+      const oy = y;
+      let lifted = false; // 離開過邊界之後，再碰到邊界就碎
+      let samples = [{ t: performance.now(), x: sx, y: sy }];
+
+      const end = () => {
+        btn.removeEventListener('pointermove', onMove);
+        btn.removeEventListener('pointerup', onUp);
+        btn.removeEventListener('pointercancel', onUp);
+      };
+
+      const onMove = (ev) => {
+        const rawX = ox + (ev.clientX - sx) * OVERSHOOT;
+        const rawY = oy + (ev.clientY - sy) * OVERSHOOT;
+        const mx = maxX();
+        const my = maxY();
+        const touching = rawX <= 0 || rawX >= mx || rawY <= 0 || rawY >= my;
+        x = clamp(rawX, 0, mx);
+        y = clamp(rawY, 0, my);
+        place();
+
+        const now = performance.now();
+        samples.push({ t: now, x: ev.clientX, y: ev.clientY });
+        samples = samples.filter((s) => now - s.t < 100);
+
+        if (!touching) lifted = true;
+        else if (lifted) {
+          end();
+          breakIt();
+        }
+      };
+
+      const onUp = () => {
+        end();
+        if (mode !== 'dragging') return;
+        const moved = Math.hypot(x - ox, y - oy);
+        if (moved < 6) return run('falling'); // 只是按一下，掉回地上
+
+        // 放手的瞬間再「不小心」多用一點力
+        const first = samples[0];
+        const lastS = samples[samples.length - 1];
+        const dt = Math.max(0.016, (lastS.t - first.t) / 1000);
+        let dx = ((lastS.x - first.x) / dt) * OVERSHOOT * 2;
+        let dy = ((lastS.y - first.y) / dt) * OVERSHOOT * 2;
+        if (Math.hypot(dx, dy) < 50) {
+          dx = x - ox;
+          dy = y - oy;
+        }
+        throwToward(dx, dy, 2200);
+      };
+
+      btn.addEventListener('pointermove', onMove);
+      btn.addEventListener('pointerup', onUp);
+      btn.addEventListener('pointercancel', onUp);
+    });
+
+    const onResize = () => {
+      if (mode !== 'resting') return;
+      x = clamp(x, 0, maxX());
+      y = maxY();
+      place();
+    };
+    window.addEventListener('resize', onResize);
+    cleanups.push(() => window.removeEventListener('resize', onResize));
   }
 
   /* ---------- 逃跑的按鈕 ---------- */
